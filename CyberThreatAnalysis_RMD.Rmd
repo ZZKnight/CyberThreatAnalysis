@@ -1,0 +1,611 @@
+---
+title: "Cybersecurity Threat Analysis Dashboard"
+author: "Zhiming Zhang @zzknight2016@gmail.com"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    social: menu
+    source_code: embed
+    navbar:
+      - { title: "Overview", href: "#overview", align: left }
+      - { title: "Trends", href: "#trends", align: left }
+      - { title: "Networks", href: "#networks", align: left }
+      - { title: "Clustering", href: "#clustering", align: left }
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(highcharter)
+library(dplyr)
+library(viridisLite)
+library(forecast)
+library(treemap)
+library(arules)
+library(readr)
+library(ggplot2)
+library(corrplot)
+library(zoo)
+library(tidyr)
+library(networkD3)
+library(ggrepel)
+library(ggraph)
+library(visNetwork)
+library(bnlearn)
+library(igraph)
+
+# Custom theme
+thm <- 
+  hc_theme(
+    colors = c("#1a6ecc", "#434348", "#90ed7d", "#f7a35c", "#8085e9"),
+    chart = list(
+      backgroundColor = "transparent",
+      style = list(fontFamily = "Source Sans Pro")
+    ),
+    xAxis = list(
+      gridLineWidth = 1
+    )
+  )
+
+```
+
+
+```{r data_loading_preprocessing, include=FALSE}
+# Data Loading
+df1209 <- read_csv("Data/2022-12-09-enriched.csv")
+df0704 <- read_csv("Data/2022-07-04-enriched.csv")
+df0627 <- read_csv("Data/2022-06-27-enriched.csv")
+df0609 <- read_csv("Data/2022-06-09-enriched.csv")
+df0608 <- read_csv("Data/2022-06-08-enriched.csv")
+
+all_df <- rbind(df0608, df0609, df0627, df0704, df1209)
+
+# remove "notes" column which contains no valuable info
+all_df <- subset(all_df, select = -c(notes))
+
+# Impute missing values using the first non-missing value with the same cve_id
+# (see the R script for more information)
+all_imp <- all_df %>%
+  group_by(cve_id) %>%
+  mutate(across(everything(), ~if_else(is.na(.), first(.[!is.na(.)]), .)))
+
+# Impute product and short description columns
+all_imp$product[is.na(all_imp$product)] <- "fuel cms"
+all_imp$short_description[is.na(all_imp$short_description)] <- "na"
+
+# Impute pub_date for NA values based on cve_id
+all_imp <- all_imp %>%
+  group_by(cve_id) %>%
+  mutate(pub_date = ifelse(
+    is.na(pub_date), 
+    if(all(is.na(pub_date))) NA else max(pub_date, na.rm = TRUE), 
+    pub_date
+  ))
+
+all_imp <- na.omit(all_imp)
+
+# Create numerical version for analysis
+all_num_clean <- all_imp
+all_num_clean$product <- as.numeric(as.factor(all_imp$product))
+all_num_clean$vulnerability_name <- as.numeric(as.factor(all_imp$vulnerability_name))
+all_num_clean$short_description <- as.numeric(as.factor(all_imp$short_description))
+all_num_clean$required_action <- as.numeric(as.factor(all_imp$required_action))
+all_num_clean$cwe <- as.numeric(as.factor(all_imp$cwe))
+all_num_clean$vector <- as.numeric(as.factor(all_imp$vector))
+all_num_clean$complexity <- as.numeric(as.factor(all_imp$complexity))
+all_num_clean$severity <- as.numeric(as.factor(all_imp$severity))
+all_num_clean$vendor_project <- as.numeric(as.factor(all_imp$vendor_project))
+all_num_clean$cve_id <- as.numeric(as.factor(all_imp$cve_id))
+all_num_clean$date_added <- as.numeric(as.factor(all_imp$date_added))
+all_num_clean$due_date <- as.numeric(as.factor(all_imp$due_date))
+all_num_clean$pub_date <- as.numeric(as.factor(all_imp$pub_date))
+
+# Calculate patching time
+all_imp$patching_time <- as.numeric(all_imp$due_date - all_imp$pub_date)
+```
+
+Overview {data-navmenu="Analysis"}
+=====================================
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Dataset Summary
+
+```{r}
+valueBox(
+  value = nrow(all_imp),
+  caption = "Total Vulnerabilities",
+  icon = "fa-bug",
+  color = "danger"
+)
+```
+
+### Unique CVEs
+
+```{r}
+valueBox(
+  value = length(unique(all_imp$cve_id)),
+  caption = "Unique CVE IDs",
+  icon = "fa-shield-alt",
+  color = "warning"
+)
+```
+
+### Vendors Affected
+
+```{r}
+valueBox(
+  value = length(unique(all_imp$vendor_project)),
+  caption = "Unique Vendors",
+  icon = "fa-building",
+  color = "info"
+)
+```
+
+### Products Affected
+
+```{r}
+valueBox(
+  value = length(unique(all_imp$product)),
+  caption = "Unique Products",
+  icon = "fa-cogs",
+  color = "success"
+)
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Vulnerability Severity Distribution
+
+```{r}
+severity_counts <- table(all_imp$severity)
+severity_df <- data.frame(
+  severity = names(severity_counts),
+  count = as.numeric(severity_counts)
+)
+
+hchart(severity_df, "pie", hcaes(x = severity, y = count), name = "Vulnerabilities") %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Distribution of Vulnerability Severity Levels") %>%
+  hc_tooltip(pointFormat = "<b>{point.name}</b>: {point.y} ({point.percentage:.1f}%)")
+```
+
+### Top 10 Vendors by Vulnerability Count
+
+```{r}
+top_vendors <- all_imp %>%
+  group_by(vendor_project) %>%
+  summarize(total_vulnerabilities = n()) %>%
+  arrange(desc(total_vulnerabilities)) %>%
+  head(10)
+
+hchart(top_vendors, "column", hcaes(x = vendor_project, y = total_vulnerabilities)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Top 10 Vendors with Highest Number of Vulnerabilities") %>%
+  hc_xAxis(title = list(text = "Vendor")) %>%
+  hc_yAxis(title = list(text = "Total Vulnerabilities")) %>%
+  hc_plotOptions(column = list(dataLabels = list(enabled = TRUE)))
+```
+
+
+### Top 10 Products with Most Vulnerabilities
+
+```{r}
+top_products <- all_imp %>%
+  group_by(product) %>%
+  summarize(total_vulnerabilities = n()) %>%
+  arrange(desc(total_vulnerabilities)) %>%
+  head(10)
+
+hchart(top_products, "bar", hcaes(x = product, y = total_vulnerabilities)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Top 10 Products by Vulnerability Count") %>%
+  hc_xAxis(title = list(text = "Product")) %>%
+  hc_yAxis(title = list(text = "Total Vulnerabilities"))
+```
+
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Vulnerability by Vector Type
+
+```{r}
+vector_counts <- all_imp %>%
+  group_by(vector) %>%
+  summarise(count = n()) %>%
+  drop_na()
+
+hchart(vector_counts, "bar", hcaes(x = vector, y = count)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Distribution of Vulnerabilities by Attack Vector") %>%
+  hc_xAxis(title = list(text = "Attack Vector")) %>%
+  hc_yAxis(title = list(text = "Count"))
+```
+
+### Complexity Level Distribution
+
+```{r}
+complexity_counts <- table(all_imp$complexity)
+complexity_df <- data.frame(
+  complexity = names(complexity_counts),
+  count = as.numeric(complexity_counts)
+)
+
+hchart(complexity_df, "column", hcaes(x = complexity, y = count)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Vulnerability Distribution by Complexity Level") %>%
+  hc_xAxis(title = list(text = "Complexity Level")) %>%
+  hc_yAxis(title = list(text = "Count")) %>%
+  hc_plotOptions(column = list(dataLabels = list(enabled = TRUE)))
+```
+
+
+### Most Common CWE Categories
+
+```{r}
+common_cwe <- all_imp %>%
+  group_by(cwe) %>%
+  summarize(total_vulnerabilities = n()) %>%
+  arrange(desc(total_vulnerabilities)) %>%
+  head(10)
+
+hchart(common_cwe, "column", hcaes(x = cwe, y = total_vulnerabilities)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Most Common CWE Categories") %>%
+  hc_xAxis(title = list(text = "CWE Category")) %>%
+  hc_yAxis(title = list(text = "Count")) %>%
+  hc_plotOptions(column = list(dataLabels = list(enabled = TRUE)))
+```
+
+
+Patching Speed {data-navmenu="Analysis"}
+=====================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+###  Patching Speed Distribution
+```{r}
+# Calculate patching time
+all_imp$patching_time <- all_imp$due_date - all_imp$pub_date
+all_imp$patching_time <- as.numeric(all_imp$patching_time)
+
+# Create histogram data for highcharter
+hist_data <- hist(all_imp$patching_time, breaks = 20, plot = FALSE)
+hist_df <- data.frame(
+  x = hist_data$mids,
+  y = hist_data$counts
+)
+
+# Create interactive histogram with highcharter
+hchart(hist_df, "column", hcaes(x = x, y = y)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Distribution of Patching Time") %>%
+  hc_xAxis(title = list(text = "Patching Time (Days)")) %>%
+  hc_yAxis(title = list(text = "Frequency")) %>%
+  hc_tooltip(
+    pointFormat = "Days: {point.x:.1f}<br/>Count: {point.y}"
+  ) %>%
+  hc_plotOptions(
+    column = list(
+      borderWidth = 0,
+      groupPadding = 0,
+      pointPadding = 0.05
+    )
+  )
+```
+
+### Patching Speed Analysis
+
+```{r}
+# Calculate average patching time by vendor
+patching_speed <- all_imp %>%
+  filter(!is.na(patching_time)) %>%
+  group_by(vendor_project) %>%
+  summarise(avg_patching_time = mean(patching_time, na.rm = TRUE),
+            count = n()) %>%
+  filter(count >= 5) %>%  # Only vendors with at least 5 vulnerabilities
+  arrange(avg_patching_time) %>%
+  head(15)
+
+hchart(patching_speed, "column", hcaes(x = vendor_project, y = avg_patching_time)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Average Patching Time by Vendor (days)") %>%
+  hc_xAxis(title = list(text = "Vendor")) %>%
+  hc_yAxis(title = list(text = "Average Days to Patch")) %>%
+  hc_plotOptions(column = list(dataLabels = list(enabled = TRUE, format = "{point.y:.0f}")))
+```
+
+
+Trends {data-navmenu="Analysis"}
+=====================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Summary
+
+```{r}
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Vulnerability Trends Over Time
+
+```{r}
+# Convert date_added column to year-month format
+all_imp$date_added_ym <- as.yearmon(all_imp$date_added)
+vuln_counts <- table(all_imp$date_added_ym)
+
+# Create trend data frame with proper date conversion
+trend_df <- data.frame(
+  date_ym = names(vuln_counts),
+  count = as.numeric(vuln_counts)
+) %>%
+  mutate(
+    date = as.Date(as.yearmon(date_ym))
+  )
+
+hchart(trend_df, "line", hcaes(x = date, y = count)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Vulnerability Discovery Trends Over Time") %>%
+  hc_xAxis(title = list(text = "Date"), type = "datetime") %>%
+  hc_yAxis(title = list(text = "Number of Vulnerabilities")) %>%
+  hc_tooltip(xDateFormat = "%Y-%m")
+```
+
+### Severity Trends by Time
+
+```{r}
+severity_time <- all_imp %>%
+  mutate(date_added_ym = as.yearmon(date_added)) %>%
+  group_by(date_added_ym, severity) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  mutate(date = as.Date(date_added_ym))
+
+# Handle NA values and filter valid data
+severity_time <- severity_time %>%
+  filter(!is.na(date) & !is.na(severity))
+
+severity_colors <- c("CRITICAL" = "#d32f2f", "HIGH" = "#f57c00", "MEDIUM" = "#fbc02d", "LOW" = "#388e3c")
+
+if(nrow(severity_time) > 0) {
+  hchart(severity_time, "line", hcaes(x = date, y = count, group = severity)) %>%
+    hc_add_theme(thm) %>%
+    hc_title(text = "Vulnerability Trends by Severity Over Time") %>%
+    hc_xAxis(title = list(text = "Date"), type = "datetime") %>%
+    hc_yAxis(title = list(text = "Count")) %>%
+    hc_colors(unname(severity_colors[names(severity_colors) %in% unique(severity_time$severity)]))
+} else {
+  # Fallback static chart if data is problematic
+  severity_counts <- table(all_imp$severity)
+  severity_df <- data.frame(
+    severity = names(severity_counts),
+    count = as.numeric(severity_counts)
+  )
+  hchart(severity_df, "column", hcaes(x = severity, y = count)) %>%
+    hc_add_theme(thm) %>%
+    hc_title(text = "Vulnerability Count by Severity")
+}
+```
+
+
+Networks {data-navmenu="Analysis"}
+=====================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Vendor-Product Network
+```{r}
+# Create a data frame of nodes
+nodes <- data.frame(id = unique(c(all_imp$vendor_project, all_imp$product)), 
+                    label = unique(c(all_imp$vendor_project, all_imp$product)))
+
+# Create a data frame of edges
+edges <- data.frame(from = all_imp$vendor_project, to = all_imp$product)
+
+# Create the visNetwork object with nodes and edges data
+network <- visNetwork(nodes, edges) %>%
+  visOptions(width = "100%", height = "500px") %>%
+  visInteraction(hover = TRUE, hoverConnectedEdges = TRUE) %>%
+  visPhysics(enabled = TRUE)
+
+network
+```
+
+### Network with Fruchterman-Reingold Layout 
+```{r}
+
+network_data <- all_imp[, c("vendor_project", "product")]
+
+# Create edge list
+edge_list <- as.matrix(network_data)
+
+graph <- graph_from_edgelist(edge_list, directed = TRUE)
+
+# Create layout using Fruchterman-Reingold algorithm
+layout <- layout_with_fr(graph)
+
+# Convert graph layout to data frame
+layout_df <- data.frame(layout)
+
+# Add vendor/product names to layout data frame
+layout_df$names <- V(graph)$name
+
+graph_plot <- ggraph(graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point(shape = 21, fill = "#005c87", color = "gray") +
+  geom_node_text(aes(label = name), repel = TRUE, box.padding = 0.5, size = 3, max.overlaps = 20) +
+  theme_void()
+
+graph_plot
+```
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Network Centrality Analysis
+
+```{r}
+# Calculate centrality measures - explicitly use igraph::degree
+g <- graph_from_data_frame(all_imp, directed = FALSE)
+centrality <- igraph::degree(g)  # Explicitly use igraph::degree
+top_central <- head(sort(centrality, decreasing = TRUE), 10)
+
+
+central_df <- data.frame(
+  entity = names(top_central),
+  centrality = as.numeric(top_central)
+)
+
+hchart(central_df, "bar", hcaes(x = entity, y = centrality)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Top 10 Most Central Entities in Network") %>%
+  hc_xAxis(title = list(text = "Entity")) %>%
+  hc_yAxis(title = list(text = "Degree Centrality"))
+```
+
+
+Clustering {data-navmenu="Analysis"}
+=====================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### CWE vs Severity Heatmap
+
+```{r}
+# Create heatmap data
+heatmap_data <- all_num_clean %>%
+  group_by(cwe, severity) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  filter(count > 0)
+
+# Convert to matrix format for heatmap
+hchart(heatmap_data, "heatmap", hcaes(x = cwe, y = severity, value = count)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Vulnerability Clusters: CWE vs Severity") %>%
+  hc_xAxis(title = list(text = "CWE Category")) %>%
+  hc_yAxis(title = list(text = "Severity Level")) %>%
+  hc_colorAxis(min = 0, minColor = "#FFFFFF", maxColor = "#1a6ecc") %>%
+  hc_tooltip(pointFormat = "CWE: {point.x}<br>Severity: {point.y}<br>Count: <b>{point.value}</b>")
+```
+
+### Vector vs Severity Analysis
+
+```{r}
+vector_severity_data <- all_imp %>%
+  group_by(vector, severity) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  filter(!is.na(vector) & !is.na(severity))
+
+hchart(vector_severity_data, "column", hcaes(x = vector, y = count, group = severity)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Vulnerability Distribution: Vector vs Severity") %>%
+  hc_xAxis(title = list(text = "Attack Vector")) %>%
+  hc_yAxis(title = list(text = "Count")) %>%
+  hc_plotOptions(column = list(stacking = "normal"))
+```
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### CVSS Score Distribution
+
+```{r}
+cvss_data <- all_imp %>%
+  filter(!is.na(cvss)) %>%
+  mutate(cvss_range = cut(cvss, breaks = c(0, 3, 6, 9, 10), 
+                         labels = c("Low (0-3)", "Medium (3-6)", "High (6-9)", "Critical (9-10)")))
+
+cvss_dist <- cvss_data %>%
+  group_by(cvss_range) %>%
+  summarise(count = n())
+
+hchart(cvss_dist, "pie", hcaes(x = cvss_range, y = count)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "CVSS Score Distribution") %>%
+  hc_tooltip(pointFormat = "<b>{point.name}</b>: {point.y} ({point.percentage:.1f}%)")
+```
+
+### Correlation Matrix
+
+```{r}
+# Select numeric columns for correlation
+cor_data <- all_num_clean[, c("severity", "cvss", "complexity", "vector")]
+cor_matrix <- cor(cor_data, use = "complete.obs")
+
+# Convert correlation matrix to long format
+cor_long <- expand.grid(Var1 = rownames(cor_matrix), Var2 = colnames(cor_matrix))
+cor_long$value <- as.vector(cor_matrix)
+
+hchart(cor_long, "heatmap", hcaes(x = Var1, y = Var2, value = value)) %>%
+  hc_add_theme(thm) %>%
+  hc_title(text = "Correlation Matrix of Key Variables") %>%
+  hc_xAxis(title = list(text = "")) %>%
+  hc_yAxis(title = list(text = "")) %>%
+  hc_colorAxis(min = -1, max = 1, minColor = "#d32f2f", maxColor = "#1976d2") %>%
+  hc_tooltip(pointFormat = "Correlation: <b>{point.value:.3f}</b>")
+```
+
+Summary {data-navmenu="Insights"}
+=====================================
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Key Findings {.no-title}
+
+**Dataset Overview:**
+- **Total Vulnerabilities:** `r nrow(all_imp)` vulnerabilities across `r length(unique(all_imp$vendor_project))` vendors
+- **Time Period:** Data spanning from 2022-06-08 to 2022-12-09
+- **Coverage:** `r length(unique(all_imp$product))` unique products affected
+
+**Severity Distribution:**
+- **Critical:** `r round(sum(all_imp$severity == "CRITICAL")/nrow(all_imp)*100, 1)`% of vulnerabilities
+- **High:** `r round(sum(all_imp$severity == "HIGH")/nrow(all_imp)*100, 1)`% of vulnerabilities  
+- **Medium:** `r round(sum(all_imp$severity == "MEDIUM")/nrow(all_imp)*100, 1)`% of vulnerabilities
+- **Low:** `r round(sum(all_imp$severity == "LOW")/nrow(all_imp)*100, 1)`% of vulnerabilities
+
+**Top Risk Areas:**
+- **Primary Attack Vector:** Network (`r round(sum(all_imp$vector == "NETWORK", na.rm=TRUE)/sum(!is.na(all_imp$vector))*100, 1)`% of vulnerabilities)
+- **Most Affected Vendor:** Microsoft with `r sum(all_imp$vendor_project == "microsoft", na.rm=TRUE)` vulnerabilities
+- **Most Affected Product:** Windows with `r sum(all_imp$product == "windows", na.rm=TRUE)` vulnerabilities
+
+**Patching Performance:**
+- **Average Patching Time:** `r round(mean(all_imp$patching_time, na.rm=TRUE), 0)` days
+- **Median Patching Time:** `r round(median(all_imp$patching_time, na.rm=TRUE), 0)` days
+- **Range:** `r min(all_imp$patching_time, na.rm=TRUE)` to `r max(all_imp$patching_time, na.rm=TRUE)` days
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Recommendations {.no-title}
+
+**Immediate Actions:**
+
+1. **Prioritize Critical & High Severity:** Focus on the `r round((sum(all_imp$severity == "CRITICAL") + sum(all_imp$severity == "HIGH"))/nrow(all_imp)*100, 0)`% of vulnerabilities classified as Critical or High severity
+
+2. **Network Security:** Strengthen network-based defenses as `r round(sum(all_imp$vector == "NETWORK", na.rm=TRUE)/sum(!is.na(all_imp$vector))*100, 0)`% of vulnerabilities use network attack vectors
+
+3. **Microsoft Products:** Implement enhanced monitoring for Microsoft products, particularly Windows, given their high vulnerability count
+
+**Strategic Improvements:**
+
+4. **Reduce Patching Time:** Current average of `r round(mean(all_imp$patching_time, na.rm=TRUE), 0)` days should be reduced, especially for critical vulnerabilities
+
+5. **Vendor Engagement:** Establish dedicated security liaisons with top vendors (Microsoft, Cisco, Apple, Google)
+
+6. **Complexity Assessment:** `r round(sum(all_imp$complexity == "LOW", na.rm=TRUE)/sum(!is.na(all_imp$complexity))*100, 0)`% of vulnerabilities are low complexity - these should be prioritized for quick wins
+
+**Long-term Strategy:**
+
+7. **Trend Monitoring:** Establish continuous monitoring for vulnerability trends and emerging threat patterns
+
+8. **Network Analysis:** Use relationship mapping between vendors and products to identify potential cascade effects
+
+9. **Predictive Analytics:** Implement machine learning models to predict vulnerability emergence and optimize resource allocation
